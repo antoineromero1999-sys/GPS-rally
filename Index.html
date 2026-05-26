@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>GPS Co-Pilote Rallye</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Courier New',monospace;background:#0a0a0a;color:#e8e000;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+#map{flex:1;min-height:0}
+#hud{background:#0a0a0a;border-top:2px solid #e8e000;padding:10px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+.hud-label{font-size:10px;color:#888;letter-spacing:2px;text-align:center}
+.hud-num{font-size:26px;font-weight:bold;color:#e8e000;text-align:center;line-height:1.1}
+.hud-unit{font-size:10px;color:#aaa;text-align:center}
+#instruction-bar{background:#111;border-top:2px solid #e8e000;padding:10px 14px;display:flex;align-items:center;gap:12px;min-height:65px}
+#turn-icon{font-size:34px;min-width:40px;text-align:center}
+#dist-next{font-size:12px;color:#e8e000;letter-spacing:1px;margin-bottom:2px}
+#main-inst{font-size:14px;color:#fff;font-weight:bold;line-height:1.3}
+#search-panel{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:1000;display:flex;gap:6px;width:92%;max-width:500px}
+#dest-input{flex:1;background:#111;border:1.5px solid #e8e000;color:#e8e000;padding:8px 10px;font-family:'Courier New',monospace;font-size:14px;border-radius:4px;outline:none;-webkit-appearance:none}
+#dest-input::placeholder{color:#555}
+#go-btn{background:#e8e000;color:#000;border:none;padding:8px 14px;font-family:'Courier New',monospace;font-weight:bold;font-size:14px;cursor:pointer;border-radius:4px}
+#gps-btn{position:absolute;top:60px;left:50%;transform:translateX(-50%);z-index:1000;background:#e8e000;color:#000;border:none;padding:10px 24px;font-family:'Courier New',monospace;font-weight:bold;font-size:15px;cursor:pointer;border-radius:4px;display:none}
+#status-bar{background:#000;color:#888;font-size:11px;padding:4px 10px;text-align:center;letter-spacing:1px;border-top:1px solid #222}
+</style>
+</head>
+<body>
+
+<div id="search-panel">
+  <input id="dest-input" type="text" placeholder="Destination (ex: Paris)"/>
+  <button id="go-btn" onclick="startRoute()">GO</button>
+</div>
+
+<button id="gps-btn" onclick="requestGPS()">📍 ACTIVER LE GPS</button>
+
+<div id="map"></div>
+
+<div id="instruction-bar">
+  <div id="turn-icon">🏁</div>
+  <div>
+    <div id="dist-next">APPUYEZ SUR "ACTIVER LE GPS"</div>
+    <div id="main-inst">Puis entrez une destination</div>
+  </div>
+</div>
+
+<div id="hud">
+  <div>
+    <div class="hud-label">VITESSE</div>
+    <div class="hud-num" id="speed-val">0</div>
+    <div class="hud-unit">km/h</div>
+  </div>
+  <div>
+    <div class="hud-label">DISTANCE</div>
+    <div class="hud-num" id="dist-val">---</div>
+    <div class="hud-unit">km restants</div>
+  </div>
+  <div>
+    <div class="hud-label">ARRIVÉE</div>
+    <div class="hud-num" id="eta-val">--:--</div>
+    <div class="hud-unit">heure est.</div>
+  </div>
+</div>
+
+<div id="status-bar">EN ATTENTE...</div>
+
+<script>
+const map = L.map('map',{zoomControl:false}).setView([46.5,2.5],6);
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{attribution:'&copy; OSM &copy; CartoDB',maxZoom:19}).addTo(map);
+L.control.zoom({position:'bottomright'}).addTo(map);
+
+let userMarker=null, routeLine=null, userPos=null;
+let routeSteps=[], currentStepIdx=0;
+let lastPos=null, lastTime=null, watchId=null;
+let lastSpoken='';
+
+const posIcon=L.divIcon({html:'<div style="width:20px;height:20px;background:#e8e000;border:3px solid #fff;border-radius:50%;box-shadow:0 0 10px #e8e000"></div>',iconSize:[20,20],iconAnchor:[10,10],className:''});
+const destIcon=L.divIcon({html:'<div style="width:20px;height:20px;background:#ff3300;border:3px solid #fff;transform:rotate(45deg)"></div>',iconSize:[20,20],iconAnchor:[10,10],className:''});
+
+function setStatus(t){document.getElementById('status-bar').textContent=t}
+
+function speak(txt){
+  if(!window.speechSynthesis||txt===lastSpoken)return;
+  window.speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(txt);
+  u.lang='fr-FR';u.rate=1.05;u.pitch=1.1;u.volume=1;
+  window.speechSynthesis.speak(u);
+  lastSpoken=txt;
+}
+
+function haversine(a,b){
+  const R=6371000,r=Math.PI/180;
+  const dLat=(b.lat-a.lat)*r,dLon=(b.lng-a.lng)*r;
+  const x=Math.sin(dLat/2)**2+Math.cos(a.lat*r)*Math.cos(b.lat*r)*Math.sin(dLon/2)**2;
+  return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));
+}
+
+function formatDist(m){
+  if(m>=1000)return`${(m/1000).toFixed(1)} km`;
+  return`${Math.ceil(m/25)*25} m`;
+}
+
+function rallyShort(step){
+  const t=step.maneuver?.type||'',m=step.maneuver?.modifier||'';
+  const map2={
+    'turn-right':'DROITE ▶','turn-left':'◀ GAUCHE',
+    'turn-sharp-right':'ÉPINGLE DROITE ↱','turn-sharp-left':'↰ ÉPINGLE GAUCHE',
+    'turn-slight-right':'LÉGÈRE DROITE','turn-slight-left':'LÉGÈRE GAUCHE',
+    'roundabout':'ROND-POINT 🔄','arrive':'🏁 ARRIVÉE','depart':'🚦 DÉPART',
+    'new name-straight':'TOUT DROIT ⬆','continue-straight':'TOUT DROIT ⬆'
+  };
+  return map2[`${t}-${m}`]||map2[t]||'TOUT DROIT ⬆';
+}
+
+function rallyVoice(step,dist){
+  const t=step.maneuver?.type||'',m=step.maneuver?.modifier||'';
+  const d=formatDist(dist);
+  const v={
+    'turn-right':`Dans ${d}, virage à droite`,
+    'turn-left':`Dans ${d}, virage à gauche`,
+    'turn-sharp-right':`Dans ${d}, épingle droite, serré !`,
+    'turn-sharp-left':`Dans ${d}, épingle gauche, serré !`,
+    'turn-slight-right':`Dans ${d}, légère droite`,
+    'turn-slight-left':`Dans ${d}, légère gauche`,
+    'roundabout':`Dans ${d}, rond-point`,
+    'arrive':`Dans ${d}, destination atteinte`,
+    'depart':`Départ, bonne route pilote !`
+  };
+  return v[`${t}-${m}`]||v[t]||`Dans ${d}, tout droit`;
+}
+
+function turnEmoji(step){
+  const t=step.maneuver?.type||'',m=step.maneuver?.modifier||'';
+  if(t==='arrive')return'🏁';
+  if(t==='depart')return'🚦';
+  if(t==='roundabout')return'🔄';
+  if(m==='right'||m==='sharp right')return'↱';
+  if(m==='left'||m==='sharp left')return'↰';
+  return'⬆';
+}
+
+function updateHUD(step, distToStep){
+  document.getElementById('turn-icon').textContent=turnEmoji(step);
+  document.getElementById('dist-next').textContent=`DANS ${formatDist(distToStep)}`;
+  document.getElementById('main-inst').textContent=rallyShort(step)+(step.name?` — ${step.name}`:'');
+  if(distToStep<=120&&distToStep>80)speak(rallyVoice(step,distToStep));
+  else if(distToStep<=320&&distToStep>280)speak(rallyVoice(step,distToStep));
+}
+
+function onPos(pos){
+  const lat=pos.coords.latitude,lng=pos.coords.longitude;
+  userPos={lat,lng};
+
+  // Speed
+  let spd=null;
+  if(pos.coords.speed!=null&&pos.coords.speed>=0)spd=Math.round(pos.coords.speed*3.6);
+  else if(lastPos&&lastTime){
+    const dt=(Date.now()-lastTime)/3600000;
+    if(dt>0)spd=Math.round(haversine(lastPos,userPos)/1000/dt);
+  }
+  if(spd!==null)document.getElementById('speed-val').textContent=spd;
+  lastPos={lat,lng};lastTime=Date.now();
+
+  if(!userMarker){
+    userMarker=L.marker([lat,lng],{icon:posIcon,zIndexOffset:1000}).addTo(map);
+    map.setView([lat,lng],15);
+    setStatus('GPS VERROUILLÉ ✓ — ENTREZ VOTRE DESTINATION');
+    document.getElementById('dist-next').textContent='GPS ACTIF';
+    document.getElementById('main-inst').textContent='Entrez une destination et appuyez GO';
+    document.getElementById('gps-btn').style.display='none';
+  } else {
+    userMarker.setLatLng([lat,lng]);
+  }
+
+  if(!routeSteps.length)return;
+
+  // Step tracking
+  let bestD=Infinity;
+  for(let i=currentStepIdx;i<Math.min(currentStepIdx+4,routeSteps.length);i++){
+    const wp=routeSteps[i].maneuver?.location;
+    if(!wp)continue;
+    const d=haversine(userPos,{lat:wp[1],lng:wp[0]});
+    if(d<30&&i<routeSteps.length-1){currentStepIdx=i+1;break;}
+    if(d<bestD)bestD=d;
+  }
+
+  const step=routeSteps[currentStepIdx];
+  if(!step)return;
+  const wp=step.maneuver?.location;
+  const dist=wp?haversine(userPos,{lat:wp[1],lng:wp[0]}):step.distance;
+  updateHUD(step,dist);
+
+  let rem=dist;
+  for(let i=currentStepIdx+1;i<routeSteps.length;i++)rem+=routeSteps[i].distance;
+  document.getElementById('dist-val').textContent=(rem/1000).toFixed(1);
+  const now=new Date();now.setMinutes(now.getMinutes()+Math.round(rem/1000/50*60));
+  document.getElementById('eta-val').textContent=now.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'});
+
+  if(dist<25&&currentStepIdx===routeSteps.length-1){
+    speak('Destination atteinte ! Fin de spéciale. Bien joué pilote !');
+    document.getElementById('turn-icon').textContent='🏁';
+    document.getElementById('dist-next').textContent='ARRIVÉE';
+    document.getElementById('main-inst').textContent='DESTINATION ATTEINTE — BRAVO !';
+  }
+}
+
+function onErr(e){
+  setStatus('ERREUR GPS: '+e.message);
+  document.getElementById('gps-btn').style.display='block';
+  document.getElementById('dist-next').textContent='GPS INDISPONIBLE';
+  document.getElementById('main-inst').textContent='Vérifiez les réglages de localisation';
+}
+
+// Sur iPhone il faut un geste utilisateur pour déclencher le GPS
+function requestGPS(){
+  document.getElementById('gps-btn').style.display='none';
+  setStatus('ACQUISITION GPS...');
+  document.getElementById('dist-next').textContent='ACQUISITION GPS...';
+  document.getElementById('main-inst').textContent='Veuillez patienter...';
+  if(!navigator.geolocation){
+    setStatus('GPS NON SUPPORTÉ');return;
+  }
+  // Premier appel simple pour déclencher la permission iOS
+  navigator.geolocation.getCurrentPosition(pos=>{
+    onPos(pos);
+    // Puis watch en continu
+    watchId=navigator.geolocation.watchPosition(onPos,onErr,{
+      enableHighAccuracy:true,timeout:15000,maximumAge:3000
+    });
+  },onErr,{enableHighAccuracy:true,timeout:15000,maximumAge:0});
+}
+
+async function startRoute(){
+  const dest=document.getElementById('dest-input').value.trim();
+  if(!dest){setStatus('ENTREZ UNE DESTINATION');return;}
+  if(!userPos){setStatus('ACTIVEZ LE GPS D\'ABORD');return;}
+  setStatus('CALCUL ITINÉRAIRE...');
+  try{
+    const gc=await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(dest)}&limit=1`);
+    const gj=await gc.json();
+    if(!gj.length){setStatus('DESTINATION INTROUVABLE');return;}
+    const dLat=parseFloat(gj[0].lat),dLng=parseFloat(gj[0].lon);
+    const rr=await fetch(`https://router.project-osrm.org/route/v1/driving/${userPos.lng},${userPos.lat};${dLng},${dLat}?steps=true&overview=full&geometries=geojson`);
+    const rj=await rr.json();
+    if(!rj.routes?.length){setStatus('TRAJET IMPOSSIBLE');return;}
+    const route=rj.routes[0];
+    routeSteps=route.legs[0].steps;
+    currentStepIdx=0;
+    if(routeLine)map.removeLayer(routeLine);
+    const coords=route.geometry.coordinates.map(c=>[c[1],c[0]]);
+    routeLine=L.polyline(coords,{color:'#e8e000',weight:5,opacity:0.9}).addTo(map);
+    L.marker([dLat,dLng],{icon:destIcon}).addTo(map);
+    map.fitBounds(routeLine.getBounds(),{padding:[60,60]});
+    document.getElementById('dist-val').textContent=(route.distance/1000).toFixed(1);
+    const now=new Date();now.setMinutes(now.getMinutes()+Math.round(route.duration/60));
+    document.getElementById('eta-val').textContent=now.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'});
+    speak(`Spéciale chargée. ${Math.round(route.distance/1000)} kilomètres. Bonne route pilote !`);
+    setStatus(`SPÉCIALE ACTIVE — ${Math.round(route.distance/1000)} KM`);
+    updateHUD(routeSteps[0],routeSteps[0].distance);
+  }catch(e){setStatus('ERREUR RÉSEAU');console.error(e);}
+}
+
+document.getElementById('dest-input').addEventListener('keydown',e=>{if(e.key==='Enter')startRoute();});
+
+// Affiche le bouton GPS au démarrage — nécessaire sur iPhone
+document.getElementById('gps-btn').style.display='block';
+setStatus('APPUYEZ SUR "ACTIVER LE GPS"');
+</script>
+</body>
+</html>
