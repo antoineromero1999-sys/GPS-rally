@@ -70,9 +70,9 @@ const map = L.map('map',{zoomControl:false}).setView([46.5,2.5],6);
 L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{attribution:'&copy; OSM &copy; CartoDB',maxZoom:19}).addTo(map);
 L.control.zoom({position:'bottomright'}).addTo(map);
 
-let userMarker=null, routeLine=null, userPos=null;
-let routeSteps=[], currentStepIdx=0;
-let lastPos=null, lastTime=null, watchId=null;
+let userMarker=null,routeLine=null,userPos=null;
+let routeSteps=[],currentStepIdx=0;
+let lastPos=null,lastTime=null;
 let lastSpoken='';
 
 const posIcon=L.divIcon({html:'<div style="width:20px;height:20px;background:#e8e000;border:3px solid #fff;border-radius:50%;box-shadow:0 0 10px #e8e000"></div>',iconSize:[20,20],iconAnchor:[10,10],className:''});
@@ -140,7 +140,7 @@ function turnEmoji(step){
   return'⬆';
 }
 
-function updateHUD(step, distToStep){
+function updateHUD(step,distToStep){
   document.getElementById('turn-icon').textContent=turnEmoji(step);
   document.getElementById('dist-next').textContent=`DANS ${formatDist(distToStep)}`;
   document.getElementById('main-inst').textContent=rallyShort(step)+(step.name?` — ${step.name}`:'');
@@ -151,8 +151,6 @@ function updateHUD(step, distToStep){
 function onPos(pos){
   const lat=pos.coords.latitude,lng=pos.coords.longitude;
   userPos={lat,lng};
-
-  // Speed
   let spd=null;
   if(pos.coords.speed!=null&&pos.coords.speed>=0)spd=Math.round(pos.coords.speed*3.6);
   else if(lastPos&&lastTime){
@@ -161,7 +159,6 @@ function onPos(pos){
   }
   if(spd!==null)document.getElementById('speed-val').textContent=spd;
   lastPos={lat,lng};lastTime=Date.now();
-
   if(!userMarker){
     userMarker=L.marker([lat,lng],{icon:posIcon,zIndexOffset:1000}).addTo(map);
     map.setView([lat,lng],15);
@@ -169,13 +166,11 @@ function onPos(pos){
     document.getElementById('dist-next').textContent='GPS ACTIF';
     document.getElementById('main-inst').textContent='Entrez une destination et appuyez GO';
     document.getElementById('gps-btn').style.display='none';
+    speak('GPS verrouillé. Entrez votre destination pilote !');
   } else {
     userMarker.setLatLng([lat,lng]);
   }
-
   if(!routeSteps.length)return;
-
-  // Step tracking
   let bestD=Infinity;
   for(let i=currentStepIdx;i<Math.min(currentStepIdx+4,routeSteps.length);i++){
     const wp=routeSteps[i].maneuver?.location;
@@ -184,19 +179,16 @@ function onPos(pos){
     if(d<30&&i<routeSteps.length-1){currentStepIdx=i+1;break;}
     if(d<bestD)bestD=d;
   }
-
   const step=routeSteps[currentStepIdx];
   if(!step)return;
   const wp=step.maneuver?.location;
   const dist=wp?haversine(userPos,{lat:wp[1],lng:wp[0]}):step.distance;
   updateHUD(step,dist);
-
   let rem=dist;
   for(let i=currentStepIdx+1;i<routeSteps.length;i++)rem+=routeSteps[i].distance;
   document.getElementById('dist-val').textContent=(rem/1000).toFixed(1);
   const now=new Date();now.setMinutes(now.getMinutes()+Math.round(rem/1000/50*60));
   document.getElementById('eta-val').textContent=now.toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit'});
-
   if(dist<25&&currentStepIdx===routeSteps.length-1){
     speak('Destination atteinte ! Fin de spéciale. Bien joué pilote !');
     document.getElementById('turn-icon').textContent='🏁';
@@ -208,26 +200,15 @@ function onPos(pos){
 function onErr(e){
   setStatus('ERREUR GPS: '+e.message);
   document.getElementById('gps-btn').style.display='block';
-  document.getElementById('dist-next').textContent='GPS INDISPONIBLE';
-  document.getElementById('main-inst').textContent='Vérifiez les réglages de localisation';
 }
 
-// Sur iPhone il faut un geste utilisateur pour déclencher le GPS
 function requestGPS(){
   document.getElementById('gps-btn').style.display='none';
   setStatus('ACQUISITION GPS...');
-  document.getElementById('dist-next').textContent='ACQUISITION GPS...';
-  document.getElementById('main-inst').textContent='Veuillez patienter...';
-  if(!navigator.geolocation){
-    setStatus('GPS NON SUPPORTÉ');return;
-  }
-  // Premier appel simple pour déclencher la permission iOS
+  if(!navigator.geolocation){setStatus('GPS NON SUPPORTÉ');return;}
   navigator.geolocation.getCurrentPosition(pos=>{
     onPos(pos);
-    // Puis watch en continu
-    watchId=navigator.geolocation.watchPosition(onPos,onErr,{
-      enableHighAccuracy:true,timeout:15000,maximumAge:3000
-    });
+    navigator.geolocation.watchPosition(onPos,onErr,{enableHighAccuracy:true,timeout:15000,maximumAge:3000});
   },onErr,{enableHighAccuracy:true,timeout:15000,maximumAge:0});
 }
 
@@ -263,7 +244,14 @@ async function startRoute(){
 
 document.getElementById('dest-input').addEventListener('keydown',e=>{if(e.key==='Enter')startRoute();});
 
-// Affiche le bouton GPS au démarrage — nécessaire sur iPhone
+// Débloque la synthèse vocale sur iOS au premier toucher
+document.body.addEventListener('touchstart',function unlockAudio(){
+  const u=new SpeechSynthesisUtterance('');
+  u.volume=0;
+  window.speechSynthesis.speak(u);
+  document.body.removeEventListener('touchstart',unlockAudio);
+},{once:true});
+
 document.getElementById('gps-btn').style.display='block';
 setStatus('APPUYEZ SUR "ACTIVER LE GPS"');
 </script>
