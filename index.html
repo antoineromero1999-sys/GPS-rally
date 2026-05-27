@@ -216,6 +216,7 @@ async function startRoute(){
   const dest=document.getElementById('dest-input').value.trim();
   if(!dest){setStatus('ENTREZ UNE DESTINATION');return;}
   if(!userPos){setStatus('ACTIVEZ LE GPS D\'ABORD');return;}
+  speak('Co-pilote prêt. Calcul de la spéciale en cours !');
   setStatus('CALCUL ITINÉRAIRE...');
   try{
     const gc=await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(dest)}&limit=1`);
