@@ -245,14 +245,16 @@ async function startRoute(){
 
 document.getElementById('dest-input').addEventListener('keydown',e=>{if(e.key==='Enter')startRoute();});
 
-// Débloque la synthèse vocale sur iOS au premier toucher
-document.body.addEventListener('touchstart',function unlockAudio(){
-  const u=new SpeechSynthesisUtterance('');
-  u.volume=0;
+// Débloque audio iOS sur le bouton GPS directement
+function unlockAndGPS(){
+  window.speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance('Co pilote activé');
+  u.lang='fr-FR';u.volume=1;u.rate=1;
+  u.onend=()=>requestGPS();
   window.speechSynthesis.speak(u);
-  document.body.removeEventListener('touchstart',unlockAudio);
-},{once:true});
+}
 
+document.getElementById('gps-btn').onclick=unlockAndGPS;
 document.getElementById('gps-btn').style.display='block';
 setStatus('APPUYEZ SUR "ACTIVER LE GPS"');
 </script>
